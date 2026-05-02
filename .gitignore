@@ -1,0 +1,7 @@
+assets/
+__pycache__/
+*.pyc
+*.bin
+bench_c
+bench_c_q412
+.DS_Store
