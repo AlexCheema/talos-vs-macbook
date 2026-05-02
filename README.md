@@ -78,7 +78,7 @@ NumPy's per-call overhead (Python ↔ C boundary, dtype dispatch, broadcast chec
 
 MLX-on-GPU is even worse because Metal kernel launches are tens of microseconds each. Apple silicon is brilliant; it's just not the right tool for a 4,000-MAC workload. This is why people batch.
 
-The FPGA wins on perf-per-watt (a Cyclone V draws maybe 2 W; the M4 Max MacBook Pro P-core under load is more like 5 W) but not on absolute throughput. To match TALOS in C we use about 1.4% of one core's time.
+The FPGA wins on *absolute* power draw — a Cyclone V on the DE1-SoC pulls maybe 2 W; one M4 Max MacBook Pro P-core under this load is more like 5 W — but with ~71× the throughput at ~2.5× the power, the MacBook wins on perf-per-watt by roughly an order of magnitude (~28×) too. The FPGA's real advantages are form factor and deterministic latency: you can run TALOS off a battery on something credit-card sized, you can't run a MacBook there. To match TALOS in C we use about 1.4% of one core's time.
 
 ## how the C version works
 
