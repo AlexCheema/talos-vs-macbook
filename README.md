@@ -1,6 +1,6 @@
-# talos-vs-m4
+# talos-vs-macbook
 
-Have you ever wanted to know whether 50,000 tokens/sec on a custom FPGA is impressive? It is and it isn't. This repo runs Karpathy's [microGPT](https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95) — a 4,192-parameter character-level transformer — in five different ways on an M4 Max MacBook and compares them to [TALOS-V2](https://github.com/Luthiraa/TALOS-V2)'s 53,000 tok/sec hardware implementation on a Cyclone V FPGA.
+Have you ever wanted to know whether 50,000 tokens/sec on a custom FPGA is impressive? It is and it isn't. This repo runs Karpathy's [microGPT](https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95) — a 4,192-parameter character-level transformer — in five different ways on an M4 Max MacBook Pro and compares them to [TALOS-V2](https://github.com/Luthiraa/TALOS-V2)'s 53,000 tok/sec hardware implementation on a Cyclone V FPGA.
 
 The model is so small (~17 KB at fp32) that it fits in L1 cache and the whole forward pass is ~4,000 multiply-accumulates per token. That makes the benchmark less about arithmetic and more about *overhead*. The interesting question turns out to be: which implementations even *beat* the FPGA?
 
@@ -16,14 +16,14 @@ c Q4.12 fixed-point                3,143,586       59.31x
 TALOS-V2 (FPGA, 56MHz)                53,000        1.00x
 ```
 
-A single M4 P-core in well-tuned C does **~71×** the FPGA's throughput. NumPy and MLX both come in *under* the FPGA: their per-call dispatch overhead is bigger than the actual work. MLX-on-GPU is the worst — kernel launch overhead annihilates a 4K-MAC forward pass. lol.
+A single M4 Max MacBook Pro P-core in well-tuned C does **~71×** the FPGA's throughput. NumPy and MLX both come in *under* the FPGA: their per-call dispatch overhead is bigger than the actual work. MLX-on-GPU is the worst — kernel launch overhead annihilates a 4K-MAC forward pass. lol.
 
 ## try it yourself
 
 On any Apple Silicon Mac:
 
 ```bash
-git clone https://github.com/AlexCheema/talos-vs-m4 && cd talos-vs-m4 && ./run.sh
+git clone https://github.com/AlexCheema/talos-vs-macbook && cd talos-vs-macbook && ./run.sh
 ```
 
 That's it. The script fetches microGPT's trained weights from upstream, builds the C versions with `clang -O3 -march=native -ffast-math`, and runs all six implementations back-to-back. Takes about 90 seconds total. You only need `python3`, `numpy`, `make`, and `clang` (all already on a stock Mac); MLX is optional (`pip install mlx` if you want those rows).
@@ -72,13 +72,13 @@ The model is genuinely tiny. One forward pass is roughly:
 - 1 matmul (64,16)·(16,) + 1 matmul (16,64)·(64,): 2,048 FMAs
 - 1 lm_head matmul (27,16)·(16,): 432 FMAs
 
-Round it to ~4,000 multiply-accumulates per token. At single-thread M4 Max NEON throughput (~16 GFLOPS in scalar fp32, much more with FMA pipelines), the *arithmetic* takes well under a microsecond. So if you can dispatch the work in <1 µs you'll fly; otherwise you don't.
+Round it to ~4,000 multiply-accumulates per token. At single-thread M4 Max MacBook Pro NEON throughput (~16 GFLOPS in scalar fp32, much more with FMA pipelines), the *arithmetic* takes well under a microsecond. So if you can dispatch the work in <1 µs you'll fly; otherwise you don't.
 
 NumPy's per-call overhead (Python ↔ C boundary, dtype dispatch, broadcast checks) is in the few-microseconds range. With ~25 ops per token × ~1 µs each, you're already at 25 µs/token = 40k tok/sec — which is exactly what we measure. The numbers aren't a NumPy weakness; they're a model-too-small situation.
 
 MLX-on-GPU is even worse because Metal kernel launches are tens of microseconds each. Apple silicon is brilliant; it's just not the right tool for a 4,000-MAC workload. This is why people batch.
 
-The FPGA wins on perf-per-watt (a Cyclone V draws maybe 2 W; the M4 Max P-core under load is more like 5 W) but not on absolute throughput. To match TALOS in C we use about 1.4% of one core's time.
+The FPGA wins on perf-per-watt (a Cyclone V draws maybe 2 W; the M4 Max MacBook Pro P-core under load is more like 5 W) but not on absolute throughput. To match TALOS in C we use about 1.4% of one core's time.
 
 ## how the C version works
 
