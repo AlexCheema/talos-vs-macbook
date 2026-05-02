@@ -18,6 +18,12 @@ TALOS-V2 (FPGA, 56MHz)                53,000        1.00x
 
 A single M4 Max MacBook Pro P-core in well-tuned C does **~71×** the FPGA's throughput. NumPy and MLX both come in *under* the FPGA: their per-call dispatch overhead is bigger than the actual work. MLX-on-GPU is the worst — kernel launch overhead annihilates a 4K-MAC forward pass. lol.
 
+![throughput](charts/throughput.png)
+
+And on perf-per-watt — assuming ~5 W for one M4 Max P-core under load and ~2 W for the Cyclone V fabric — the MacBook still wins by a wide margin. TALOS sits comfortably above the Python and MLX bars (Python overhead is just wasted power) but the C versions clear it by ~25–30×.
+
+![perf-per-watt](charts/perf_per_watt.png)
+
 ## try it yourself
 
 On any Apple Silicon Mac:
