@@ -119,11 +119,14 @@ def make_step(device, seed=42):
     return step
 
 
-def make_async_step(device, seed=42):
-    """Async step: never syncs. Returns (step, flush). Caller must flush periodically
-    and once at end of timed window for memory safety and correct timing."""
+def make_async_step(device, seed=42, rollout=1):
+    """Async step: never syncs. Returns (step, flush, tokens_per_call).
+    rollout > 1 unrolls R sequential token generations into one compiled
+    dispatch — fewer Python iterations, fewer mx.array allocs per token,
+    larger fused graph for MLX to optimize."""
     import random
-    g, forward, forward_and_sample, step_graph = build(device)
+    from functools import partial
+    g, forward, forward_and_sample, _ = build(device)
     rng = random.Random(seed)
     state = {
         "tok": mx.array(BOS, dtype=mx.int32),
@@ -132,32 +135,61 @@ def make_async_step(device, seed=42):
         "V": mx.zeros((BLOCK_SIZE, N_EMBD), dtype=mx.float32),
     }
 
+    bos_arr = mx.array(BOS, dtype=mx.int32)
+    zero_arr = mx.array(0, dtype=mx.int32)
+    block_arr = mx.array(BLOCK_SIZE, dtype=mx.int32)
+
+    def step_rollout(tok_in, pos_in, u_arr, K, V):
+        """u_arr: (rollout,). Generates `rollout` tokens sequentially."""
+        tok, pos = tok_in, pos_in
+        for r in range(rollout):
+            need_reset_pre = pos >= block_arr
+            tok = mx.where(need_reset_pre, bos_arr, tok)
+            pos = mx.where(need_reset_pre, zero_arr, pos)
+            nxt, K, V = forward_and_sample(tok, pos, u_arr[r], K, V)
+            nxt_i32 = nxt.astype(mx.int32)
+            is_bos = nxt_i32 == bos_arr
+            tok = mx.where(is_bos, bos_arr, nxt_i32)
+            pos = mx.where(is_bos, zero_arr, pos + 1)
+        return tok, pos, K, V
+
+    step_rollout_compiled = mx.compile(step_rollout)
+
     def step():
-        u_arr = mx.array(np.float32(rng.random()))
-        nt, np_, K_new, V_new = step_graph(state["tok"], state["pos"], u_arr, state["K"], state["V"])
+        u = np.fromiter((rng.random() for _ in range(rollout)),
+                        dtype=np.float32, count=rollout)
+        u_arr = mx.array(u)
+        nt, np_, K_new, V_new = step_rollout_compiled(
+            state["tok"], state["pos"], u_arr, state["K"], state["V"]
+        )
         state["tok"], state["pos"], state["K"], state["V"] = nt, np_, K_new, V_new
 
     def flush():
         mx.eval(state["tok"], state["pos"], state["K"], state["V"])
 
-    return step, flush
+    return step, flush, rollout
 
 
-def benchmark_async(step, flush, n, warmup, label, flush_every=64):
+def benchmark_async(step, flush, n, warmup, label, flush_every=64, tokens_per_call=1):
+    """n is the requested *token* count; total tokens generated = n_calls * tokens_per_call.
+    flush_every is in calls, not tokens — flushing too often serializes the pipeline."""
     import time
-    for i in range(warmup):
+    n_calls = (n + tokens_per_call - 1) // tokens_per_call
+    warmup_calls = (warmup + tokens_per_call - 1) // tokens_per_call
+    for i in range(warmup_calls):
         step()
         if (i + 1) % flush_every == 0:
             flush()
     flush()
     t0 = time.perf_counter()
-    for i in range(n):
+    for i in range(n_calls):
         step()
         if (i + 1) % flush_every == 0:
             flush()
     flush()
     t1 = time.perf_counter()
-    rate = n / (t1 - t0)
+    total_tokens = n_calls * tokens_per_call
+    rate = total_tokens / (t1 - t0)
     print(f"  {label:24s}  {rate:>14,.0f} tok/sec")
     return rate
 
@@ -238,8 +270,10 @@ def build_batched(device, batch_size):
     return mx.compile(forward_b), mx.compile(step_graph_b)
 
 
-def make_batch_step(device, batch_size, seed=42):
-    """Async-style batched step: never syncs. Returns (step, flush)."""
+def make_batch_step(device, batch_size, seed=42, rollout=1):
+    """Async-style batched step: never syncs. Returns (step, flush, tokens_per_call).
+    If rollout > 1, each call does rollout sequential token gens per stream
+    (B * rollout tokens per call) inside one compiled dispatch."""
     import random
     forward_b, step_graph_b = build_batched(device, batch_size)
     rng = random.Random(seed)
@@ -250,20 +284,40 @@ def make_batch_step(device, batch_size, seed=42):
         "V": mx.zeros((batch_size, BLOCK_SIZE, N_EMBD), dtype=mx.float32),
     }
 
-    def step():
-        u = np.fromiter((rng.random() for _ in range(batch_size)), dtype=np.float32, count=batch_size)
-        u_arr = mx.array(u)
-        nt, np_, K_new, V_new = step_graph_b(state["tok"], state["pos"], u_arr, state["K"], state["V"])
-        state["tok"], state["pos"], state["K"], state["V"] = nt, np_, K_new, V_new
+    if rollout == 1:
+        def step():
+            u = np.fromiter((rng.random() for _ in range(batch_size)),
+                            dtype=np.float32, count=batch_size)
+            u_arr = mx.array(u)
+            nt, np_, K_new, V_new = step_graph_b(state["tok"], state["pos"], u_arr, state["K"], state["V"])
+            state["tok"], state["pos"], state["K"], state["V"] = nt, np_, K_new, V_new
+    else:
+        def step_rollout_b(tok, pos, u_arr, K, V):
+            # u_arr: (rollout, batch_size)
+            for r in range(rollout):
+                tok, pos, K, V = step_graph_b(tok, pos, u_arr[r], K, V)
+            return tok, pos, K, V
+
+        step_rollout_b_compiled = mx.compile(step_rollout_b)
+
+        def step():
+            u = np.fromiter((rng.random() for _ in range(rollout * batch_size)),
+                            dtype=np.float32, count=rollout * batch_size).reshape(rollout, batch_size)
+            u_arr = mx.array(u)
+            nt, np_, K_new, V_new = step_rollout_b_compiled(
+                state["tok"], state["pos"], u_arr, state["K"], state["V"]
+            )
+            state["tok"], state["pos"], state["K"], state["V"] = nt, np_, K_new, V_new
 
     def flush():
         mx.eval(state["tok"], state["pos"], state["K"], state["V"])
 
-    return step, flush
+    return step, flush, batch_size * rollout
 
 
-def benchmark_batch(step, flush, batch_size, n_steps, warmup_steps, label, flush_every=64):
-    """Reports total tokens/sec across all batch items."""
+def benchmark_batch(step, flush, tokens_per_call, n_steps, warmup_steps, label, flush_every=64):
+    """Reports total tokens/sec. n_steps is the *call* count; total tokens = n_steps * tokens_per_call.
+    flush_every is in calls, not tokens — flushing too often serializes the pipeline."""
     import time
     for i in range(warmup_steps):
         step()
@@ -277,7 +331,7 @@ def benchmark_batch(step, flush, batch_size, n_steps, warmup_steps, label, flush
             flush()
     flush()
     t1 = time.perf_counter()
-    rate = batch_size * n_steps / (t1 - t0)
+    rate = n_steps * tokens_per_call / (t1 - t0)
     print(f"  {label:24s}  {rate:>14,.0f} tok/sec")
     return rate
 
@@ -312,6 +366,8 @@ if __name__ == "__main__":
                     help="Async pipelining: no per-step sync, flush every 64 steps + at end")
     ap.add_argument("--batch", type=int, default=1,
                     help="Batch size: process N independent streams in parallel (always async)")
+    ap.add_argument("--rollout", type=int, default=1,
+                    help="Unroll R sequential token gens into one compiled dispatch (async only)")
     ap.add_argument("--n", type=int, default=50_000)
     ap.add_argument("--warmup", type=int, default=2_000)
     args = ap.parse_args()
@@ -321,13 +377,15 @@ if __name__ == "__main__":
         for i, name in enumerate(sample_names(device, 20)):
             print(f"sample {i+1:2d}: {name}")
     elif args.batch > 1:
-        label = f"mlx fp32 ({dev_name} batch={args.batch})"
-        step, flush = make_batch_step(device, args.batch)
-        benchmark_batch(step, flush, args.batch, n_steps=args.n, warmup_steps=args.warmup, label=label)
+        suffix = f" batch={args.batch}" if args.rollout == 1 else f" batch={args.batch} r={args.rollout}"
+        label = f"mlx fp32 ({dev_name}{suffix})"
+        step, flush, tpc = make_batch_step(device, args.batch, rollout=args.rollout)
+        benchmark_batch(step, flush, tpc, n_steps=args.n, warmup_steps=args.warmup, label=label)
     elif args.async_mode:
-        label = f"mlx fp32 ({dev_name} async)"
-        step, flush = make_async_step(device)
-        benchmark_async(step, flush, n=args.n, warmup=args.warmup, label=label)
+        suffix = f" async" if args.rollout == 1 else f" async r={args.rollout}"
+        label = f"mlx fp32 ({dev_name}{suffix})"
+        step, flush, tpc = make_async_step(device, rollout=args.rollout)
+        benchmark_async(step, flush, n=args.n, warmup=args.warmup, label=label, tokens_per_call=tpc)
     else:
         label = f"mlx fp32 ({dev_name})"
         benchmark(make_step(device), n=args.n, warmup=args.warmup, label=label)

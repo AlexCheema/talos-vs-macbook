@@ -19,6 +19,7 @@ trap 'rm -f "$TMP_SINGLE" "$TMP_BATCH"' EXIT
     python3 bench_mlx.py --gpu --n 20000 --warmup 1000
     python3 bench_mlx.py --async --n 50000 --warmup 2000
     python3 bench_mlx.py --gpu --async --n 50000 --warmup 2000
+    python3 bench_mlx.py --gpu --async --rollout 8 --n 50000 --warmup 2000
   else
     echo "  mlx not installed                       skipped (pip install mlx)"
   fi
@@ -39,6 +40,7 @@ trap 'rm -f "$TMP_SINGLE" "$TMP_BATCH"' EXIT
     python3 bench_mlx.py --gpu --batch 8   --n 10000 --warmup 1000
     python3 bench_mlx.py --gpu --batch 64  --n 5000  --warmup 500
     python3 bench_mlx.py --gpu --batch 512 --n 2000  --warmup 200
+    python3 bench_mlx.py --gpu --batch 512 --rollout 4 --n 1000 --warmup 100
   fi
 } | tee "$TMP_BATCH" >/dev/null
 
