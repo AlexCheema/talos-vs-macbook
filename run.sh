@@ -15,6 +15,8 @@ TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT
   if python3 -c "import mlx.core" 2>/dev/null; then
     python3 bench_mlx.py    --n 50000  --warmup 2000
     python3 bench_mlx.py --gpu --n 20000 --warmup 1000
+    python3 bench_mlx.py --async --n 50000 --warmup 2000
+    python3 bench_mlx.py --gpu --async --n 50000 --warmup 2000
   else
     echo "  mlx not installed                       skipped (pip install mlx)"
   fi
