@@ -188,7 +188,7 @@ def benchmark_batch(batch_size, n_steps, warmup_steps, seed=42):
         tok, pos, K, V = one_step(tok, pos, K, V)
     t1 = time.perf_counter()
     rate = batch_size * n_steps / (t1 - t0)
-    print(f"  numpy fp32 (batch={batch_size:<3d})    {rate:>14,.0f} tok/sec")
+    print(f"  numpy fp32 (batch={batch_size})    {rate:>14,.0f} tok/sec")
     return rate
 
 

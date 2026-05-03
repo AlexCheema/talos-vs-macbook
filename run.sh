@@ -27,15 +27,20 @@ trap 'rm -f "$TMP_SINGLE" "$TMP_BATCH"' EXIT
 } | tee "$TMP_SINGLE" >/dev/null
 
 # Batched throughput benchmarks (different problem: N independent streams).
-if python3 -c "import mlx.core" 2>/dev/null; then
-  {
+# Skipped for pure-python (no per-call overhead to amortize) and C (would
+# require rewriting all matvecs as matmuls — multi-hundred-line job).
+{
+  python3 bench_numpy.py --batch 8   --n 10000 --warmup 1000
+  python3 bench_numpy.py --batch 64  --n 5000  --warmup 500
+  python3 bench_numpy.py --batch 512 --n 2000  --warmup 200
+  if python3 -c "import mlx.core" 2>/dev/null; then
     python3 bench_mlx.py --batch 8   --n 10000 --warmup 1000
     python3 bench_mlx.py --batch 64  --n 5000  --warmup 500
     python3 bench_mlx.py --gpu --batch 8   --n 10000 --warmup 1000
     python3 bench_mlx.py --gpu --batch 64  --n 5000  --warmup 500
     python3 bench_mlx.py --gpu --batch 512 --n 2000  --warmup 200
-  } | tee "$TMP_BATCH" >/dev/null
-fi
+  fi
+} | tee "$TMP_BATCH" >/dev/null
 
 print_table() {
   awk '
