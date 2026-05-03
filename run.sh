@@ -7,8 +7,10 @@ cd "$(dirname "$0")"
 python3 convert_weights.py >/dev/null
 make -s
 
-TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT
+TMP_SINGLE=$(mktemp); TMP_BATCH=$(mktemp)
+trap 'rm -f "$TMP_SINGLE" "$TMP_BATCH"' EXIT
 
+# Single-stream benchmarks (batch=1, char-by-char, FPGA-comparable).
 {
   python3 pure_python.py --n 2000     --warmup 200
   python3 bench_numpy.py  --n 200000  --warmup 20000
@@ -22,23 +24,45 @@ TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT
   fi
   ./bench_c       2000000 100000
   ./bench_c_q412  2000000 100000
-} | tee "$TMP" >/dev/null
+} | tee "$TMP_SINGLE" >/dev/null
+
+# Batched throughput benchmarks (different problem: N independent streams).
+if python3 -c "import mlx.core" 2>/dev/null; then
+  {
+    python3 bench_mlx.py --batch 8   --n 10000 --warmup 1000
+    python3 bench_mlx.py --batch 64  --n 5000  --warmup 500
+    python3 bench_mlx.py --gpu --batch 8   --n 10000 --warmup 1000
+    python3 bench_mlx.py --gpu --batch 64  --n 5000  --warmup 500
+    python3 bench_mlx.py --gpu --batch 512 --n 2000  --warmup 200
+  } | tee "$TMP_BATCH" >/dev/null
+fi
+
+print_table() {
+  awk '
+    /skipped/ { print; next }
+    /^[[:space:]]/ {
+      label = $1
+      for (i = 2; i <= NF - 2; i++) label = label " " $i
+      rate = $(NF - 1); gsub(",", "", rate); rate += 0
+      printf "  %-28s %14d %11.2fx\n", label, rate, rate / 53000.0
+    }
+  ' "$1"
+}
 
 echo
 echo "=== microGPT inference, single-thread, batch=1, char-by-char ==="
 echo
 printf "  %-28s %14s %12s\n" "implementation" "tok/sec" "vs FPGA"
 printf "  %-28s %14s %12s\n" "----------------------------" "--------------" "------------"
-
-awk '
-  /skipped/ { print; next }
-  /^[[:space:]]/ {
-    label = $1
-    for (i = 2; i <= NF - 2; i++) label = label " " $i
-    rate = $(NF - 1); gsub(",", "", rate); rate += 0
-    printf "  %-28s %14d %11.2fx\n", label, rate, rate / 53000.0
-  }
-' "$TMP"
-
+print_table "$TMP_SINGLE"
 printf "  %-28s %14d %11s\n" "TALOS-V2 (FPGA, 56MHz)" 53000 "1.00x"
+
+if [ -s "$TMP_BATCH" ]; then
+  echo
+  echo "=== batched throughput (N independent streams, total tok/sec) ==="
+  echo
+  printf "  %-28s %14s %12s\n" "implementation" "tok/sec" "vs FPGA"
+  printf "  %-28s %14s %12s\n" "----------------------------" "--------------" "------------"
+  print_table "$TMP_BATCH"
+fi
 echo
