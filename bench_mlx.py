@@ -61,13 +61,22 @@ def build(device):
         probs = mx.softmax(logits_out)
         return probs, K_new, V_new
 
+    def forward_and_sample(tok_arr, pos_arr, u_arr, K, V):
+        probs, K_new, V_new = forward(tok_arr, pos_arr, K, V)
+        # Inverse-CDF sample: matches Python's bisect(cumsum(probs), u).
+        cdf = mx.cumsum(probs)
+        nxt = mx.argmax((cdf > u_arr).astype(mx.int32))
+        return nxt, K_new, V_new
+
     forward = mx.compile(forward)
-    return g, forward
+    forward_and_sample = mx.compile(forward_and_sample)
+    return g, forward, forward_and_sample
 
 
 def make_step(device, seed=42):
-    g, forward = build(device)
-    sample = make_sampler(seed)
+    import random
+    g, forward, forward_and_sample = build(device)
+    rng = random.Random(seed)
     K = mx.zeros((BLOCK_SIZE, N_EMBD), dtype=mx.float32)
     V = mx.zeros((BLOCK_SIZE, N_EMBD), dtype=mx.float32)
     state = {"pos": 0, "tok": BOS}
@@ -80,10 +89,11 @@ def make_step(device, seed=42):
             state["tok"] = BOS
         tok_arr = mx.array(state["tok"])
         pos_arr = mx.array(state["pos"])
-        probs, K_new, V_new = forward(tok_arr, pos_arr, cache["K"], cache["V"])
-        mx.eval(probs, K_new, V_new)
+        u_arr = mx.array(np.float32(rng.random()))
+        nxt_arr, K_new, V_new = forward_and_sample(tok_arr, pos_arr, u_arr, cache["K"], cache["V"])
+        mx.eval(nxt_arr, K_new, V_new)
         cache["K"], cache["V"] = K_new, V_new
-        nxt = sample(np.asarray(probs).tolist())
+        nxt = nxt_arr.item()
         if nxt == BOS:
             state["pos"] = 0
             state["tok"] = BOS
@@ -97,7 +107,7 @@ def make_step(device, seed=42):
 
 def sample_names(device, n=20, seed=42):
     import random
-    g, forward = build(device)
+    g, forward, _ = build(device)
     chars = sorted("abcdefghijklmnopqrstuvwxyz")
     rng = random.Random(seed)
     out = []
