@@ -40,6 +40,8 @@ trap 'rm -f "$TMP_SINGLE" "$TMP_BATCH" "$TMP_MT"' EXIT
     python3 bench_mlx.py --gpu --batch 64  --n 5000  --warmup 500
     python3 bench_mlx.py --gpu --batch 512 --n 2000  --warmup 200
     python3 bench_mlx.py --gpu --batch 512 --rollout 4 --n 1000 --warmup 100
+    python3 bench_mlx_metal.py --streams 1024 --steps 256 --reps 20 --warmup 3
+    python3 bench_mlx_metal.py --streams 8192 --steps 256 --reps 10 --warmup 2
   fi
   ./bench_c_batch 8   2000000 100000
   ./bench_c_batch 32  500000  25000
