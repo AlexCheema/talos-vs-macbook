@@ -44,6 +44,9 @@ trap 'rm -f "$TMP_SINGLE" "$TMP_BATCH"' EXIT
   ./bench_c_batch 8   2000000 100000
   ./bench_c_batch 32  500000  25000
   ./bench_c_batch 128 100000  5000
+  ./bench_c_sme   8   2000000 100000
+  ./bench_c_sme   128 100000  5000
+  ./bench_c_sme   1024 10000  500
 } | tee "$TMP_BATCH" >/dev/null
 
 print_table() {
