@@ -28,8 +28,7 @@ trap 'rm -f "$TMP_SINGLE" "$TMP_BATCH"' EXIT
 } | tee "$TMP_SINGLE" >/dev/null
 
 # Batched throughput benchmarks (different problem: N independent streams).
-# Skipped for pure-python (no per-call overhead to amortize) and C (would
-# require rewriting all matvecs as matmuls — multi-hundred-line job).
+# Skipped for pure-python (no per-call overhead to amortize).
 {
   python3 bench_numpy.py --batch 8   --n 10000 --warmup 1000
   python3 bench_numpy.py --batch 64  --n 5000  --warmup 500
@@ -42,6 +41,9 @@ trap 'rm -f "$TMP_SINGLE" "$TMP_BATCH"' EXIT
     python3 bench_mlx.py --gpu --batch 512 --n 2000  --warmup 200
     python3 bench_mlx.py --gpu --batch 512 --rollout 4 --n 1000 --warmup 100
   fi
+  ./bench_c_batch 8   2000000 100000
+  ./bench_c_batch 32  500000  25000
+  ./bench_c_batch 128 100000  5000
 } | tee "$TMP_BATCH" >/dev/null
 
 print_table() {
