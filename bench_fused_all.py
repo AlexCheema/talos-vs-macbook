@@ -25,8 +25,8 @@ ap.add_argument("--gpu-streams", type=int, default=8192)
 ap.add_argument("--gpu-steps", type=int, default=256)
 ap.add_argument("--seconds", type=float, default=5.0,
                 help="Run roughly this long, then report.")
-ap.add_argument("--gpu-impl", default="tgkv",
-                choices=("fp32", "fp16", "simd", "tgkv"),
+ap.add_argument("--gpu-impl", default="sg",
+                choices=("fp32", "fp16", "simd", "tgkv", "sg"),
                 help="Which Metal kernel variant to use on the GPU.")
 args = ap.parse_args()
 
@@ -37,8 +37,10 @@ _MOD = {
     "fp16": "bench_mlx_metal_fp16",
     "simd": "bench_mlx_metal_simd",
     "tgkv": "bench_mlx_metal_tgkv",
+    "sg":   "bench_mlx_metal_sg",
 }[args.gpu_impl]
-_GPU_HAS_KV_OUTPUT = args.gpu_impl != "tgkv"
+_GPU_HAS_KV_OUTPUT = args.gpu_impl in ("fp32", "fp16", "simd")
+_GPU_IS_SG = args.gpu_impl == "sg"
 import importlib
 _gpu_mod = importlib.import_module(_MOD)
 KERNEL, BLOCK, EMBD = _gpu_mod.KERNEL, _gpu_mod.BLOCK, _gpu_mod.EMBD
@@ -55,15 +57,25 @@ def _shapes_dtypes(S, N, kv):
 
 def gpu_worker(stop_evt, result):
     mx.set_default_device(mx.gpu)
-    W_flat = _gpu_mod.load_weights()
-    W = mx.array(W_flat)
-    seeds = mx.array(np.arange(1, args.gpu_streams + 1, dtype=np.uint32))
+    if _GPU_IS_SG:
+        W_flat, W_lm = _gpu_mod.load_weights()
+        W = mx.array(W_flat); W_lm_a = mx.array(W_lm)
+        S = ((args.gpu_streams + 7) // 8) * 8
+        N_TG = S // 8
+        grid = (N_TG * 32, 1, 1)
+        inputs_base = lambda sds: [W, W_lm_a, sds, n_steps]
+    else:
+        W = mx.array(_gpu_mod.load_weights())
+        S = args.gpu_streams
+        grid = (S * 32, 1, 1)
+        inputs_base = lambda sds: [W, sds, n_steps]
+    seeds = mx.array(np.arange(1, S + 1, dtype=np.uint32))
     n_steps = mx.array(np.array([args.gpu_steps], dtype=np.uint32))
-    kv = args.gpu_streams * BLOCK * EMBD
-    shapes, dtypes = _shapes_dtypes(args.gpu_streams, args.gpu_steps, kv)
+    kv = S * BLOCK * EMBD
+    shapes, dtypes = _shapes_dtypes(S, args.gpu_steps, kv)
 
     for _ in range(3):
-        outs = KERNEL(inputs=[W, seeds, n_steps], grid=(args.gpu_streams * 32, 1, 1),
+        outs = KERNEL(inputs=inputs_base(seeds), grid=grid,
                       threadgroup=(32, 1, 1), output_shapes=shapes, output_dtypes=dtypes)
         mx.eval(outs[0], outs[1])
         seeds = outs[1]
@@ -71,11 +83,11 @@ def gpu_worker(stop_evt, result):
     total = 0
     t0 = time.perf_counter()
     while not stop_evt.is_set():
-        outs = KERNEL(inputs=[W, seeds, n_steps], grid=(args.gpu_streams * 32, 1, 1),
+        outs = KERNEL(inputs=inputs_base(seeds), grid=grid,
                       threadgroup=(32, 1, 1), output_shapes=shapes, output_dtypes=dtypes)
         mx.eval(outs[0], outs[1])
         seeds = outs[1]
-        total += args.gpu_streams * args.gpu_steps
+        total += S * args.gpu_steps
     t1 = time.perf_counter()
     result["tokens"] = total
     result["secs"] = t1 - t0
