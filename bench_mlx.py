@@ -19,7 +19,9 @@ def build(device):
     def rmsnorm(x):
         return x * mx.rsqrt((x * x).mean() + 1e-5)
 
-    def forward(tok_arr, pos_arr, K, V, pos_int):
+    positions = mx.arange(BLOCK_SIZE)
+
+    def forward(tok_arr, pos_arr, K, V):
         x = g["wte"][tok_arr] + g["wpe"][pos_arr]
         x = rmsnorm(x)
 
@@ -29,13 +31,18 @@ def build(device):
         k = g["layer0.attn_wk"] @ x
         v = g["layer0.attn_wv"] @ x
 
-        # Update KV cache by writing this step's row.
-        K[pos_int] = k
-        V[pos_int] = v
-        Kt = K[: pos_int + 1].reshape(pos_int + 1, N_HEAD, HEAD_DIM)
-        Vt = V[: pos_int + 1].reshape(pos_int + 1, N_HEAD, HEAD_DIM)
+        # Shape-stable KV update: scatter via one-hot mask so compile sees one shape.
+        one_hot = (positions == pos_arr).astype(mx.float32).reshape(BLOCK_SIZE, 1)
+        K_new = K * (1.0 - one_hot) + one_hot * k.reshape(1, N_EMBD)
+        V_new = V * (1.0 - one_hot) + one_hot * v.reshape(1, N_EMBD)
+
+        Kt = K_new.reshape(BLOCK_SIZE, N_HEAD, HEAD_DIM)
+        Vt = V_new.reshape(BLOCK_SIZE, N_HEAD, HEAD_DIM)
         qh = q.reshape(N_HEAD, HEAD_DIM)
         logits = mx.einsum("hd,thd->ht", qh, Kt) * inv_sqrt_hd
+        # Mask out positions strictly greater than pos_arr (still empty in cache).
+        attend_mask = (positions <= pos_arr).astype(mx.float32).reshape(1, BLOCK_SIZE)
+        logits = logits + (1.0 - attend_mask) * -1e9
         aw = mx.softmax(logits, axis=1)
         head_out = mx.einsum("ht,thd->hd", aw, Vt).reshape(N_EMBD)
 
@@ -52,8 +59,9 @@ def build(device):
         logits_out = g["lm_head"] @ x
         logits_out = logits_out * inv_temp
         probs = mx.softmax(logits_out)
-        return probs
+        return probs, K_new, V_new
 
+    forward = mx.compile(forward)
     return g, forward
 
 
@@ -64,14 +72,17 @@ def make_step(device, seed=42):
     V = mx.zeros((BLOCK_SIZE, N_EMBD), dtype=mx.float32)
     state = {"pos": 0, "tok": BOS}
 
+    cache = {"K": K, "V": V}
+
     def step():
         if state["pos"] >= BLOCK_SIZE:
             state["pos"] = 0
             state["tok"] = BOS
         tok_arr = mx.array(state["tok"])
         pos_arr = mx.array(state["pos"])
-        probs = forward(tok_arr, pos_arr, K, V, state["pos"])
-        mx.eval(probs, K, V)
+        probs, K_new, V_new = forward(tok_arr, pos_arr, cache["K"], cache["V"])
+        mx.eval(probs, K_new, V_new)
+        cache["K"], cache["V"] = K_new, V_new
         nxt = sample(np.asarray(probs).tolist())
         if nxt == BOS:
             state["pos"] = 0
@@ -96,7 +107,7 @@ def sample_names(device, n=20, seed=42):
         tok = BOS
         s = []
         for pos in range(BLOCK_SIZE):
-            probs = forward(mx.array(tok), mx.array(pos), K, V, pos)
+            probs, K, V = forward(mx.array(tok), mx.array(pos), K, V)
             mx.eval(probs, K, V)
             tok = rng.choices(range(VOCAB_SIZE), weights=np.asarray(probs).tolist())[0]
             if tok == BOS:
