@@ -101,6 +101,97 @@ def make_step(seed=42):
     return step
 
 
+# ---------- batched path ----------
+
+POSITIONS = np.arange(BLOCK_SIZE, dtype=np.int32)
+
+
+def forward_batched(tok, pos, K, V):
+    """tok, pos: (B,) int. K, V: (B, BLOCK_SIZE, N_EMBD)."""
+    B = tok.shape[0]
+    x = WTE[tok] + WPE[pos]                                    # (B, N_EMBD)
+    # rmsnorm over last axis
+    ms = (x * x).mean(axis=-1, keepdims=True)
+    x = x / np.sqrt(ms + np.float32(1e-5))
+
+    xr = x
+    ms = (x * x).mean(axis=-1, keepdims=True)
+    x = x / np.sqrt(ms + np.float32(1e-5))
+    q = x @ WQ.T                                               # (B, N_EMBD)
+    k = x @ WK.T
+    v = x @ WV.T
+
+    # Shape-stable KV update.
+    one_hot = (POSITIONS[None, :] == pos[:, None]).astype(np.float32)[:, :, None]
+    K = K * (1.0 - one_hot) + one_hot * k[:, None, :]
+    V = V * (1.0 - one_hot) + one_hot * v[:, None, :]
+
+    # Per-head attention with broadcast.
+    qh = q.reshape(B, N_HEAD, HEAD_DIM)                        # (B, H, D)
+    Kh = K.reshape(B, BLOCK_SIZE, N_HEAD, HEAD_DIM).transpose(0, 2, 1, 3)  # (B, H, T, D)
+    Vh = V.reshape(B, BLOCK_SIZE, N_HEAD, HEAD_DIM).transpose(0, 2, 1, 3)
+    # logits (B, H, T) = qh (B,H,D) . Kh (B,H,T,D)
+    logits = np.einsum("bhd,bhtd->bht", qh, Kh) * INV_SQRT_HD
+    mask = (POSITIONS[None, None, :] <= pos[:, None, None])    # (B, 1, T)
+    logits = np.where(mask, logits, np.float32(-1e9))
+    logits -= logits.max(axis=-1, keepdims=True)
+    np.exp(logits, out=logits)
+    logits /= logits.sum(axis=-1, keepdims=True)
+    head_out = np.einsum("bht,bhtd->bhd", logits, Vh).reshape(B, N_EMBD)
+
+    x = head_out @ WO.T
+    x = x + xr
+
+    xr = x
+    ms = (x * x).mean(axis=-1, keepdims=True)
+    x = x / np.sqrt(ms + np.float32(1e-5))
+    h = x @ W1.T
+    np.maximum(h, 0, out=h)
+    x = h @ W2.T
+    x = x + xr
+
+    out = (x @ LM.T) * INV_TEMP                                # (B, VOCAB)
+    out -= out.max(axis=-1, keepdims=True)
+    np.exp(out, out=out)
+    out /= out.sum(axis=-1, keepdims=True)
+    return out, K, V
+
+
+def benchmark_batch(batch_size, n_steps, warmup_steps, seed=42):
+    import time, random
+    rng = random.Random(seed)
+    tok = np.full((batch_size,), BOS, dtype=np.int32)
+    pos = np.zeros((batch_size,), dtype=np.int32)
+    K = np.zeros((batch_size, BLOCK_SIZE, N_EMBD), dtype=np.float32)
+    V = np.zeros((batch_size, BLOCK_SIZE, N_EMBD), dtype=np.float32)
+
+    def one_step(tok, pos, K, V):
+        # Pre-sample reset.
+        reset = pos >= BLOCK_SIZE
+        tok = np.where(reset, BOS, tok)
+        pos = np.where(reset, 0, pos)
+        probs, K, V = forward_batched(tok, pos, K, V)
+        # Inverse-CDF sampling, vectorized.
+        u = np.fromiter((rng.random() for _ in range(batch_size)),
+                        dtype=np.float32, count=batch_size)
+        cdf = np.cumsum(probs, axis=-1)
+        nxt = (cdf > u[:, None]).argmax(axis=-1).astype(np.int32)
+        is_bos = nxt == BOS
+        next_tok = np.where(is_bos, BOS, nxt)
+        next_pos = np.where(is_bos, 0, pos + 1)
+        return next_tok, next_pos, K, V
+
+    for _ in range(warmup_steps):
+        tok, pos, K, V = one_step(tok, pos, K, V)
+    t0 = time.perf_counter()
+    for _ in range(n_steps):
+        tok, pos, K, V = one_step(tok, pos, K, V)
+    t1 = time.perf_counter()
+    rate = batch_size * n_steps / (t1 - t0)
+    print(f"  numpy fp32 (batch={batch_size:<3d})    {rate:>14,.0f} tok/sec")
+    return rate
+
+
 def sample_names(n=20, seed=42):
     import random
     chars = sorted("abcdefghijklmnopqrstuvwxyz")
@@ -128,11 +219,14 @@ def sample_names(n=20, seed=42):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--names", action="store_true")
+    ap.add_argument("--batch", type=int, default=1, help="Batch size: process N independent streams in parallel")
     ap.add_argument("--n", type=int, default=200_000)
     ap.add_argument("--warmup", type=int, default=20_000)
     args = ap.parse_args()
     if args.names:
         for i, name in enumerate(sample_names(20)):
             print(f"sample {i+1:2d}: {name}")
+    elif args.batch > 1:
+        benchmark_batch(args.batch, n_steps=args.n, warmup_steps=args.warmup)
     else:
         benchmark(make_step(), n=args.n, warmup=args.warmup, label="numpy fp32")
