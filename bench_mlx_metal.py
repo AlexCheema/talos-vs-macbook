@@ -10,13 +10,6 @@ import os, sys, time, argparse
 import numpy as np
 import mlx.core as mx
 
-ap = argparse.ArgumentParser()
-ap.add_argument("--streams", type=int, default=1024)
-ap.add_argument("--steps", type=int, default=256)
-ap.add_argument("--reps", type=int, default=20)
-ap.add_argument("--warmup", type=int, default=5)
-args = ap.parse_args()
-
 VOCAB = 27
 BLOCK = 16
 EMBD  = 16
@@ -268,6 +261,13 @@ def load_weights():
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--streams", type=int, default=1024)
+    ap.add_argument("--steps", type=int, default=256)
+    ap.add_argument("--reps", type=int, default=20)
+    ap.add_argument("--warmup", type=int, default=5)
+    args = ap.parse_args()
+
     S = args.streams
     N = args.steps
 

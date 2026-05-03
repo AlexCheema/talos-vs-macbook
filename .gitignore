@@ -9,6 +9,7 @@ bench_c_batch_mt
 bench_c_sme
 bench_c_sme_mt
 bench_c_sme_fp16
+__pycache__
 bench_c_sme_bf16
 bench_c_graph_step
 bench_c_graph_probe
