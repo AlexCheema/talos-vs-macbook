@@ -13,20 +13,17 @@ def build(device):
     mx.set_default_device(device)
     W = load_weights()
     g = {k: mx.array(np.asarray(v)) for k, v in W.items()}
-    inv_sqrt_hd = mx.array(np.float32(1.0 / np.sqrt(HEAD_DIM)))
+    inv_sqrt_hd = float(1.0 / np.sqrt(HEAD_DIM))
     inv_temp = mx.array(np.float32(1.0 / TEMPERATURE))
-
-    def rmsnorm(x):
-        return x * mx.rsqrt((x * x).mean() + 1e-5)
 
     positions = mx.arange(BLOCK_SIZE)
 
     def forward(tok_arr, pos_arr, K, V):
         x = g["wte"][tok_arr] + g["wpe"][pos_arr]
-        x = rmsnorm(x)
+        x = mx.fast.rms_norm(x, weight=None, eps=1e-5)
 
         xr = x
-        x = rmsnorm(x)
+        x = mx.fast.rms_norm(x, weight=None, eps=1e-5)
         q = g["layer0.attn_wq"] @ x
         k = g["layer0.attn_wk"] @ x
         v = g["layer0.attn_wv"] @ x
@@ -36,21 +33,21 @@ def build(device):
         K_new = K * (1.0 - one_hot) + one_hot * k.reshape(1, N_EMBD)
         V_new = V * (1.0 - one_hot) + one_hot * v.reshape(1, N_EMBD)
 
-        Kt = K_new.reshape(BLOCK_SIZE, N_HEAD, HEAD_DIM)
-        Vt = V_new.reshape(BLOCK_SIZE, N_HEAD, HEAD_DIM)
-        qh = q.reshape(N_HEAD, HEAD_DIM)
-        logits = mx.einsum("hd,thd->ht", qh, Kt) * inv_sqrt_hd
-        # Mask out positions strictly greater than pos_arr (still empty in cache).
-        attend_mask = (positions <= pos_arr).astype(mx.float32).reshape(1, BLOCK_SIZE)
-        logits = logits + (1.0 - attend_mask) * -1e9
-        aw = mx.softmax(logits, axis=1)
-        head_out = mx.einsum("ht,thd->hd", aw, Vt).reshape(N_EMBD)
+        # Reshape to (B=1, N_heads, T, D) for fused SDPA.
+        q_in = q.reshape(1, N_HEAD, 1, HEAD_DIM)
+        k_in = K_new.reshape(BLOCK_SIZE, N_HEAD, HEAD_DIM).transpose(1, 0, 2).reshape(1, N_HEAD, BLOCK_SIZE, HEAD_DIM)
+        v_in = V_new.reshape(BLOCK_SIZE, N_HEAD, HEAD_DIM).transpose(1, 0, 2).reshape(1, N_HEAD, BLOCK_SIZE, HEAD_DIM)
+        attn_mask = (positions <= pos_arr).reshape(1, 1, 1, BLOCK_SIZE)
+        attn_out = mx.fast.scaled_dot_product_attention(
+            q_in, k_in, v_in, scale=inv_sqrt_hd, mask=attn_mask
+        )
+        head_out = attn_out.reshape(N_EMBD)
 
         x = g["layer0.attn_wo"] @ head_out
         x = x + xr
 
         xr = x
-        x = rmsnorm(x)
+        x = mx.fast.rms_norm(x, weight=None, eps=1e-5)
         h = g["layer0.mlp_fc1"] @ x
         h = mx.maximum(h, 0)
         x = g["layer0.mlp_fc2"] @ h
