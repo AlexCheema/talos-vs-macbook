@@ -13,7 +13,7 @@ HAVE_NVCC := $(shell command -v $(NVCC) 2>/dev/null)
 LDLIBS   := -lm -lmvec
 endif
 
-all: bench_c bench_c_q412 bench_c_batch bench_c_sme
+all: bench_c bench_c_q412 bench_c_batch bench_c_sme bench_c_sme_bf16
 ifneq ($(HAVE_NVCC),)
 all: bench_cuda bench_cuda_persistent
 endif
@@ -36,7 +36,10 @@ bench_c_batch: bench_c_batch.c
 bench_c_sme: bench_c_sme.c
 	$(CC) $(CFLAGS) $< -o $@ -framework Accelerate
 
+bench_c_sme_bf16: bench_c_sme_bf16.c
+	$(CC) $(CFLAGS) $< -o $@ -framework Accelerate
+
 clean:
-	rm -f bench_c bench_c_q412 bench_c_batch bench_c_sme bench_cuda bench_cuda_persistent
+	rm -f bench_c bench_c_q412 bench_c_batch bench_c_sme bench_c_sme_bf16 bench_cuda bench_cuda_persistent
 
 .PHONY: all clean
