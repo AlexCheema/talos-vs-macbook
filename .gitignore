@@ -5,7 +5,9 @@ __pycache__/
 bench_c
 bench_c_q412
 bench_c_batch
+bench_c_batch_mt
 bench_c_sme
+bench_c_sme_mt
 bench_c_sme_bf16
 bench_c_graph_step
 bench_c_graph_probe

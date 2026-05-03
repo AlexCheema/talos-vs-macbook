@@ -7,8 +7,8 @@ cd "$(dirname "$0")"
 python3 convert_weights.py >/dev/null
 make -s
 
-TMP_SINGLE=$(mktemp); TMP_BATCH=$(mktemp)
-trap 'rm -f "$TMP_SINGLE" "$TMP_BATCH"' EXIT
+TMP_SINGLE=$(mktemp); TMP_BATCH=$(mktemp); TMP_MT=$(mktemp)
+trap 'rm -f "$TMP_SINGLE" "$TMP_BATCH" "$TMP_MT"' EXIT
 
 # Single-stream benchmarks (batch=1, char-by-char, FPGA-comparable).
 {
@@ -49,6 +49,14 @@ trap 'rm -f "$TMP_SINGLE" "$TMP_BATCH"' EXIT
   ./bench_c_sme   1024 10000  500
 } | tee "$TMP_BATCH" >/dev/null
 
+# Multi-threaded throughput: scale across CPU cores. M5 Max = 12 P + 6 E.
+{
+  ./bench_c_batch_mt 384  12 1000000 50000   # NEON, 12 P-cores
+  ./bench_c_batch_mt 576  18 1000000 50000   # NEON, all 18 cores
+  ./bench_c_sme_mt   3072 12 200000  10000   # SME2, 12 P-cores, B/thr=256
+  ./bench_c_sme_mt   4608 18 200000  10000   # SME2, all 18 cores, B/thr=256
+} | tee "$TMP_MT" >/dev/null
+
 print_table() {
   awk '
     /skipped/ { print; next }
@@ -76,5 +84,14 @@ if [ -s "$TMP_BATCH" ]; then
   printf "  %-28s %14s %12s\n" "implementation" "tok/sec" "vs FPGA"
   printf "  %-28s %14s %12s\n" "----------------------------" "--------------" "------------"
   print_table "$TMP_BATCH"
+fi
+
+if [ -s "$TMP_MT" ]; then
+  echo
+  echo "=== multi-threaded throughput (CPU cores in parallel, total tok/sec) ==="
+  echo
+  printf "  %-28s %14s %12s\n" "implementation" "tok/sec" "vs FPGA"
+  printf "  %-28s %14s %12s\n" "----------------------------" "--------------" "------------"
+  print_table "$TMP_MT"
 fi
 echo
