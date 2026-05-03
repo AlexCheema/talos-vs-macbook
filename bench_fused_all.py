@@ -25,32 +25,46 @@ ap.add_argument("--gpu-streams", type=int, default=8192)
 ap.add_argument("--gpu-steps", type=int, default=256)
 ap.add_argument("--seconds", type=float, default=5.0,
                 help="Run roughly this long, then report.")
+ap.add_argument("--gpu-impl", default="tgkv",
+                choices=("fp32", "fp16", "simd", "tgkv"),
+                help="Which Metal kernel variant to use on the GPU.")
 args = ap.parse_args()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from bench_mlx_metal import KERNEL, BLOCK, EMBD
+_MOD = {
+    "fp32": "bench_mlx_metal",
+    "fp16": "bench_mlx_metal_fp16",
+    "simd": "bench_mlx_metal_simd",
+    "tgkv": "bench_mlx_metal_tgkv",
+}[args.gpu_impl]
+_GPU_HAS_KV_OUTPUT = args.gpu_impl != "tgkv"
+import importlib
+_gpu_mod = importlib.import_module(_MOD)
+KERNEL, BLOCK, EMBD = _gpu_mod.KERNEL, _gpu_mod.BLOCK, _gpu_mod.EMBD
+_GPU_DTYPE = mx.float32 if args.gpu_impl == "fp32" else mx.float16
+_GPU_BENCH = _MOD + ".py"
+
+
+def _shapes_dtypes(S, N, kv):
+    if _GPU_HAS_KV_OUTPUT:
+        return ([(S * N,), (S,), (kv,), (kv,)],
+                [mx.uint32, mx.uint32, _GPU_DTYPE, _GPU_DTYPE])
+    return ([(S * N,), (S,)], [mx.uint32, mx.uint32])
 
 
 def gpu_worker(stop_evt, result):
     mx.set_default_device(mx.gpu)
-    raw = np.load(os.path.join(HERE, "assets/weights_only.npy"), allow_pickle=True).item()
-    order = ["wte", "wpe",
-             "layer0.attn_wq", "layer0.attn_wk", "layer0.attn_wv", "layer0.attn_wo",
-             "layer0.mlp_fc1", "layer0.mlp_fc2", "lm_head"]
-    W_flat = np.concatenate([raw[k].astype(np.float32).ravel() for k in order])
+    W_flat = _gpu_mod.load_weights()
     W = mx.array(W_flat)
     seeds = mx.array(np.arange(1, args.gpu_streams + 1, dtype=np.uint32))
     n_steps = mx.array(np.array([args.gpu_steps], dtype=np.uint32))
     kv = args.gpu_streams * BLOCK * EMBD
+    shapes, dtypes = _shapes_dtypes(args.gpu_streams, args.gpu_steps, kv)
 
-    # warmup
     for _ in range(3):
         outs = KERNEL(inputs=[W, seeds, n_steps], grid=(args.gpu_streams * 32, 1, 1),
-                      threadgroup=(32, 1, 1),
-                      output_shapes=[(args.gpu_streams * args.gpu_steps,),
-                                     (args.gpu_streams,), (kv,), (kv,)],
-                      output_dtypes=[mx.uint32, mx.uint32, mx.float32, mx.float32])
+                      threadgroup=(32, 1, 1), output_shapes=shapes, output_dtypes=dtypes)
         mx.eval(outs[0], outs[1])
         seeds = outs[1]
 
@@ -58,10 +72,7 @@ def gpu_worker(stop_evt, result):
     t0 = time.perf_counter()
     while not stop_evt.is_set():
         outs = KERNEL(inputs=[W, seeds, n_steps], grid=(args.gpu_streams * 32, 1, 1),
-                      threadgroup=(32, 1, 1),
-                      output_shapes=[(args.gpu_streams * args.gpu_steps,),
-                                     (args.gpu_streams,), (kv,), (kv,)],
-                      output_dtypes=[mx.uint32, mx.uint32, mx.float32, mx.float32])
+                      threadgroup=(32, 1, 1), output_shapes=shapes, output_dtypes=dtypes)
         mx.eval(outs[0], outs[1])
         seeds = outs[1]
         total += args.gpu_streams * args.gpu_steps
@@ -111,7 +122,7 @@ def measure_cpu_alone():
 
 def measure_gpu_alone():
     """Run the GPU bench alone for ~args.seconds."""
-    cmd = [sys.executable, os.path.join(HERE, "bench_mlx_metal.py"),
+    cmd = [sys.executable, os.path.join(HERE, _GPU_BENCH),
            "--streams", str(args.gpu_streams), "--steps", str(args.gpu_steps),
            "--reps", "5", "--warmup", "1"]
     short = subprocess.run(cmd, capture_output=True, text=True, check=True,
@@ -119,7 +130,7 @@ def measure_gpu_alone():
     parts = short.stdout.strip().split()
     rate = float(parts[-2].replace(",", ""))
     reps_for_seconds = max(2, int(rate * args.seconds / (args.gpu_streams * args.gpu_steps)))
-    cmd2 = [sys.executable, os.path.join(HERE, "bench_mlx_metal.py"),
+    cmd2 = [sys.executable, os.path.join(HERE, _GPU_BENCH),
             "--streams", str(args.gpu_streams), "--steps", str(args.gpu_steps),
             "--reps", str(reps_for_seconds), "--warmup", "2"]
     out = subprocess.run(cmd2, capture_output=True, text=True, check=True,
