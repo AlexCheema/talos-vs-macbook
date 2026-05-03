@@ -7,3 +7,4 @@ bench_c_q412
 bench_cuda
 bench_cuda_persistent
 .DS_Store
+.venv/
