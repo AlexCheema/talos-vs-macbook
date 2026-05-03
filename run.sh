@@ -51,6 +51,10 @@ trap 'rm -f "$TMP_SINGLE" "$TMP_BATCH" "$TMP_MT"' EXIT
 
 # Multi-threaded throughput: scale across CPU cores. M5 Max = 12 P + 6 E.
 {
+  python3 bench_numpy_mt.py --batch 12096 --workers 12 --n 200 --warmup 30
+  if python3 -c "import mlx.core" 2>/dev/null; then
+    python3 bench_mlx_mt.py --batch 12096 --workers 12 --n 200 --warmup 30
+  fi
   ./bench_c_batch_mt 384  12 1000000 50000   # NEON, 12 P-cores
   ./bench_c_batch_mt 576  18 1000000 50000   # NEON, all 18 cores
   ./bench_c_sme_mt   3072 12 200000  10000   # SME2, 12 P-cores, B/thr=256
