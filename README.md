@@ -144,6 +144,8 @@ NumPy's per-call overhead (Python ↔ C boundary, dtype dispatch, broadcast chec
 
 MLX-on-GPU is even worse because Metal kernel launches are tens of microseconds each. Apple silicon is brilliant; it's just not the right tool for a 4,000-MAC workload. This is why people batch.
 
+The same logic reproduces on Grace and Blackwell. NumPy fp32 on Grace lands at 41,032 tok/sec — *also* under the FPGA — despite the underlying BLAS being completely different from Apple's (OpenBLAS on aarch64 Linux vs Accelerate). The bottleneck isn't BLAS, it's the Python ↔ C boundary, so the number is roughly platform-flat across all three Apple chips and Grace. And `bench_cuda` (naïve launch-per-op CUDA) lands at 19,127 tok/sec on Blackwell — same death-by-launch-overhead pattern, just on a different launch surface. Kernel launches on Blackwell are *cheaper* than Metal's (naïve CUDA beats M4 Max MLX-on-GPU 6×) but with ~25 launches plus a host↔device token-id round-trip per token, you're at ~50 µs/token = ~19k tok/sec. Same disease, different syringe.
+
 The FPGA wins on *absolute* power draw — a Cyclone V on the DE1-SoC pulls maybe 2 W; one M4 Max MacBook Pro P-core under this load is more like 5 W — but with ~71× the throughput at ~2.5× the power, the MacBook wins on perf-per-watt by roughly an order of magnitude (~28×) too. The FPGA's real advantages are form factor and deterministic latency: you can run TALOS off a battery on something credit-card sized, you can't run a MacBook there. To match TALOS in C we use about 1.4% of one core's time.
 
 ## how the C version works
@@ -168,6 +170,18 @@ The same `bench_c.c` and `bench_c_q412.c` build cleanly on Grace ARM (gcc 13.3, 
 Crucially, the next iteration just continues the loop. No relaunch, no host roundtrip, no global memory traffic for activations between tokens. Only the KV cache writes touch shared memory across iterations. The only host involvement during timing is `cudaDeviceSynchronize()` at the very end.
 
 This is the only path on the GPU that beats the FPGA. The naïve `bench_cuda.cu` (one launch per matmul / RMSNorm / softmax / sample, with the token id round-tripping host↔device every step) loses 22× to the persistent version — almost all of that gap is launch overhead, not arithmetic.
+
+## why is Blackwell slower than Grace?
+
+A single Grace core in C+NEON does 4.36M tok/sec. The persistent CUDA kernel — same forward pass, no relaunches, weights pinned in shared memory — does 413K tok/sec on Blackwell. **A 10.5× gap on identical work.** The model still fits in cache on both sides, so it's not memory bandwidth. Where does the gap go?
+
+Two factors stack.
+
+**Clock.** Grace's Cortex-X925 boosts to ~3.9 GHz; a Blackwell SM in GB10 clocks at ~1.5–2 GHz. Roughly 2× behind on raw clock before anything else.
+
+**Active SIMT lanes.** A single warp does 1 instruction per warp-clock across 32 lanes. On this model that's only 16 lanes during the (R, EMBD) matvecs, 4 during attention (one per head), and 1 during the sampler. Effective lane utilisation across the forward pass is roughly 50%. Useful ops per warp-clock end up similar to what one Grace core issues per cycle through its wide out-of-order + 4-lane NEON FMA pipes — but the GPU is taking ~2× the wall-time per warp-clock because of clock.
+
+2× clock × 2× IPC + a small per-op `__syncwarp` overhead across ~25 sequential ops ≈ 10×. Matches the measured ratio. The persistent kernel isn't doing anything wrong — single-stream char-by-char inference at this scale just isn't where GPUs live. *Multiple* persistent kernels — one block per SM, ~80 SMs on GB10 — would scale linearly: >30M tok/sec batched throughput on the same hardware. Different question, different answer.
 
 ## todos
 
