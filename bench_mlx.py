@@ -60,9 +60,16 @@ def build(device):
 
     def forward_and_sample(tok_arr, pos_arr, u_arr, K, V):
         probs, K_new, V_new = forward(tok_arr, pos_arr, K, V)
-        # Inverse-CDF sample: matches Python's bisect(cumsum(probs), u).
+        # Inverse-CDF sample: matches Python's bisect(cumsum(probs), u),
+        # including the fallback-to-last-token behavior when floating-point
+        # roundoff leaves the final cumulative probability below u.
         cdf = mx.cumsum(probs)
-        nxt = mx.argmax((cdf > u_arr).astype(mx.int32))
+        gt = cdf > u_arr
+        nxt = mx.where(
+            mx.any(gt),
+            mx.argmax(gt.astype(mx.int32)),
+            mx.array(VOCAB_SIZE - 1, dtype=mx.int32),
+        )
         return nxt, K_new, V_new
 
     bos_arr = mx.array(BOS, dtype=mx.int32)
