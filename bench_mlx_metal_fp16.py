@@ -231,7 +231,8 @@ SOURCE = r"""
             tokens[stream * N_STEPS + step] = uint(picked);
             tg_tok = picked;
             int p = pos + 1;
-            if (p >= BLOCK) { p = 0; tg_tok = BOS; }
+            // Match Python/C BOS-reset: also reset pos when sampled token == BOS.
+            if (picked == BOS || p >= BLOCK) { p = 0; tg_tok = BOS; }
             tg_pos = p;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);

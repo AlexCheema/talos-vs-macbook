@@ -163,13 +163,19 @@ def step(tok, pos, K_in, V_in, u):
     logits_out = mb.mul(x=logits_out, y=inv_temp_c)
     probs = mb.softmax(x=logits_out, axis=-1)
 
-    # Inverse-CDF sample: argmax over (cumsum(probs) > u).
+    # Inverse-CDF sample: argmax over (cumsum(probs) > u). Fall back to
+    # VOCAB - 1 on rows where FP roundoff leaves the final cdf entry below
+    # 1.0; reduce_argmax would otherwise return 0 on an all-False row.
     cdf = mb.cumsum(x=probs, axis=-1)
     u_b1 = mb.expand_dims(x=u, axes=[1])                   # (B, 1)
     gt = mb.greater(x=cdf, y=u_b1)                         # (B, VOCAB) bool
     gt_i32 = mb.cast(x=gt, dtype="int32")
     nxt = mb.reduce_argmax(x=gt_i32, axis=-1, keep_dims=False)
     nxt = mb.cast(x=nxt, dtype="int32")
+    any_above = mb.cast(x=mb.reduce_max(x=gt_i32, axes=[-1], keep_dims=False),
+                        dtype="bool")
+    last_tok = mb.const(val=np.int32(VOCAB - 1))
+    nxt = mb.select(cond=any_above, a=nxt, b=last_tok)
 
     # Reset/advance: if nxt == BOS, pos_new=0, tok_new=BOS;
     #                else if pos+1 >= BLOCK, pos_new=0, tok_new=BOS;

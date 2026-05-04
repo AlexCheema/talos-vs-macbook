@@ -314,7 +314,8 @@ SOURCE = r"""
             tokens[stream_global * N_STEPS + step] = uint(picked);
             tg_tok[s] = picked;
             int p = tg_pos[s] + 1;
-            if (p >= BLOCK) { p = 0; tg_tok[s] = BOS; }
+            // Match Python/C BOS-reset: also reset pos when sampled token == BOS.
+            if (picked == BOS || p >= BLOCK) { p = 0; tg_tok[s] = BOS; }
             tg_pos[s] = p;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);

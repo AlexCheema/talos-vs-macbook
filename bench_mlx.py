@@ -267,7 +267,12 @@ def build_batched(device, batch_size):
         pos = mx.where(need_reset_pre, zero_arr, pos_in)
         probs, K_new, V_new = forward_b(tok, pos, K, V)
         cdf = mx.cumsum(probs, axis=-1)                       # (B, VOCAB_SIZE)
-        nxt = mx.argmax((cdf > u_arr.reshape(batch_size, 1)).astype(mx.int32), axis=-1)
+        mask = cdf > u_arr.reshape(batch_size, 1)
+        # Per-row fallback to VOCAB_SIZE - 1 on FP roundoff.
+        any_above = mx.any(mask, axis=-1)
+        nxt = mx.where(any_above,
+                       mx.argmax(mask.astype(mx.int32), axis=-1),
+                       mx.array(VOCAB_SIZE - 1, dtype=mx.int32))
         nxt_i32 = nxt.astype(mx.int32)
         is_bos = nxt_i32 == bos_arr
         next_tok = mx.where(is_bos, bos_arr, nxt_i32)

@@ -175,7 +175,13 @@ def benchmark_batch(batch_size, n_steps, warmup_steps, seed=42):
         u = np.fromiter((rng.random() for _ in range(batch_size)),
                         dtype=np.float32, count=batch_size)
         cdf = np.cumsum(probs, axis=-1)
-        nxt = (cdf > u[:, None]).argmax(axis=-1).astype(np.int32)
+        mask = cdf > u[:, None]
+        # Fall back to VOCAB_SIZE - 1 on rows where FP roundoff leaves the
+        # final cdf entry below 1.0; argmax of all-False would otherwise
+        # silently return 0.
+        nxt = np.where(mask.any(axis=-1),
+                       mask.argmax(axis=-1),
+                       VOCAB_SIZE - 1).astype(np.int32)
         is_bos = nxt == BOS
         next_tok = np.where(is_bos, BOS, nxt)
         next_pos = np.where(is_bos, 0, pos + 1)
