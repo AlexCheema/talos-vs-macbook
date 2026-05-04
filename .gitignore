@@ -4,4 +4,6 @@ __pycache__/
 *.bin
 bench_c
 bench_c_q412
+bench_cuda
+bench_cuda_persistent
 .DS_Store
