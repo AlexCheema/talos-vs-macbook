@@ -1,36 +1,12 @@
 # talos-vs-macbook
 
-Have you ever wanted to know whether 50,000 tokens/sec on a custom FPGA is impressive? It is and it isn't. This repo runs Karpathy's [microGPT](https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95) — a 4,192-parameter character-level transformer — in five different ways on an M4 Max MacBook Pro and compares them to [TALOS-V2](https://github.com/Luthiraa/TALOS-V2)'s 53,000 tok/sec hardware implementation on a Cyclone V FPGA.
+Have you ever wanted to know whether 50,000 tokens/sec on a custom FPGA is impressive? It is and it isn't. This repo runs Karpathy's [microGPT](https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95) — a 4,192-parameter character-level transformer — in seven different ways across an M4 Max MacBook Pro, M3 Ultra and M1 Max Mac Studios, and an [NVIDIA DGX Spark](https://www.nvidia.com/en-us/products/workstations/dgx-spark/) (GB10 superchip: a 20-core Grace ARM CPU and a Blackwell GPU), and compares all of them to [TALOS-V2](https://github.com/Luthiraa/TALOS-V2)'s 53,000 tok/sec hardware implementation on a Cyclone V FPGA.
 
 The model is so small (~17 KB at fp32) that it fits in L1 cache and the whole forward pass is ~4,000 multiply-accumulates per token. That makes the benchmark less about arithmetic and more about *overhead*. The interesting question turns out to be: which implementations even *beat* the FPGA?
 
 ```
-implementation                      tok/sec      vs FPGA
-----------------------------  --------------  -----------
-pure-python                            7,430        0.14x
-numpy fp32                            40,244        0.76x   <- slower than the FPGA!
-mlx fp32 (cpu)                         9,350        0.18x
-mlx fp32 (gpu)                         3,337        0.06x   <- much slower
-c fp32+NEON                        3,756,165       70.87x
-c Q4.12 fixed-point                3,143,586       59.31x
-TALOS-V2 (FPGA, 56MHz)                53,000        1.00x
-```
-
-A single M4 Max MacBook Pro P-core in well-tuned C does **~71×** the FPGA's throughput. NumPy and MLX both come in *under* the FPGA: their per-call dispatch overhead is bigger than the actual work. MLX-on-GPU is the worst — kernel launch overhead annihilates a 4K-MAC forward pass. lol.
-
-![throughput](charts/throughput_upstream.png)
-
-And on perf-per-watt — assuming ~5 W for one M4 Max P-core under load and ~2 W for the Cyclone V fabric — the MacBook still wins by a wide margin. TALOS sits comfortably above the Python and MLX bars (Python overhead is just wasted power) but the C versions clear it by ~25–30×.
-
-![perf-per-watt](charts/perf_per_watt_upstream.png)
-
-## also on M3 Ultra, M1 Max, and NVIDIA DGX Spark
-
-Same workload, more silicon. Three Apple chips and one DGX Spark (NVIDIA GB10 — 20-core Grace ARM CPU plus a Blackwell GPU sharing 128 GB of unified memory). The Blackwell experiments are mostly here for the sheer hell of it — single-thread C on any of these CPUs already buries the FPGA — but the question of whether a fused persistent CUDA kernel can dodge the launch-overhead curse that wrecked MLX-on-GPU seemed worth a real answer.
-
-```
-implementation                      tok/sec      vs FPGA
-----------------------------  --------------  -----------
+implementation                       tok/sec      vs FPGA
+-----------------------------  --------------  -----------
 Grace · c fp32+NEON                4,364,405       82.35x   <- new headline
 M4 Max · c fp32+NEON               3,756,165       70.87x
 M3 Ultra · c fp32+NEON             3,632,988       68.55x
@@ -53,26 +29,24 @@ M4 Max · pure-python                   7,430        0.14x
 Grace · pure-python                    6,455        0.12x
 M3 Ultra · mlx fp32 (cpu)              5,407        0.10x
 M1 Max · pure-python                   4,600        0.09x
-M4 Max · mlx fp32 (gpu)                3,337        0.06x
+M4 Max · mlx fp32 (gpu)                3,337        0.06x   <- much slower
 M1 Max · mlx fp32 (gpu)                2,196        0.04x
 M3 Ultra · mlx fp32 (gpu)              1,785        0.03x
 ```
 
-Three things stand out.
+A single Grace core (Cortex-X925 at 3.9 GHz boost) in well-tuned C does **~82×** the FPGA's throughput, beating M4 Max's hand-rolled NEON path by 16% on the same source. Apple silicon's c+NEON path holds the next three slots across three chip generations (~71× M4 Max, ~69× M3 Ultra, ~55× M1 Max). NumPy and MLX still come in *under* the FPGA on every CPU we tried — their per-call dispatch overhead is bigger than the actual work. MLX-on-GPU is the worst — kernel launch overhead annihilates a 4K-MAC forward pass. lol.
 
-**A single Grace core (Cortex-X925 at 3.9 GHz boost) hits 4,364,405 tok/sec on the same hand-rolled C+NEON — 16% above M4 Max.** ARMv9's wider NEON throughput beats M4 Max's higher clock on this workload. Same forward pass, same ~4,000 MACs, same L1 fit. X925 just throws more pipes per cycle at it.
-
-**The persistent CUDA kernel hits 413,603 tok/sec on Blackwell — 7.8× the FPGA — but still ~9× slower than every C core in the table.** One SM running at warp width can't out-throughput a 3–4 GHz wide-issue out-of-order CPU on a 4K-MAC pass. Multi-stream persistent kernels would scale linearly with SMs (~80 of them on GB10), but that's batched throughput — different question.
-
-**Naïve `cuda fp32` (one launch per matmul / RMSNorm / softmax / sample) scrapes 19,127 tok/sec.** Under the FPGA. Same death-by-launch-overhead pattern that wrecked MLX-on-GPU, but on Blackwell. Kernel launches on this GPU are cheaper than Metal's — it beats M4 Max MLX-on-GPU 6× — but still not even close to useful for single-stream char-by-char inference.
-
-Across Apple silicon, c+NEON tracks clock and microarch generation roughly linearly: M4 Max 3.76M (~4.4 GHz) > M3 Ultra 3.63M (~4.05 GHz) > M1 Max 2.91M (~3.2 GHz Firestorm). M1 Max's Q4.12 path is ~30% behind its own fp32, vs ~17% on M4 Max — Apple's int16 widening MAC pipeline got noticeably wider between 2021 and 2024.
-
-Power on Blackwell averaged **19.96 W** during the persistent run (idle floor 13.6 W, peak 20.6 W, n=257 samples at 100 ms via `nvidia-smi --query-gpu=power.draw`). That's 20.7k tok/sec/W — *under* the FPGA's 26.5k. The FPGA's 2 W floor wins efficiency even when CUDA wins absolute throughput. Grace per-core power is estimated ~3 W (not measured directly); even at a pessimistic 5 W, c+NEON on Grace still leads perf-per-watt.
+Blackwell GB10 sits in the middle. Naïve CUDA (one launch per matmul / RMSNorm / softmax / sample) lands at ~19k tok/sec — *under* the FPGA, same launch-overhead pattern as MLX-on-GPU but on a different launch surface. A fused persistent CUDA kernel that pins all 4,192 fp32 weights in shared memory and runs the entire timed window in one launch hits **~414k tok/sec — 7.8× the FPGA, but still ~10× slower than every C core in the table**. Single-stream char-by-char inference at this scale just isn't where GPUs live. (See *why is Blackwell slower than Grace?* for the cycle-counting walk-through.)
 
 ![throughput](charts/throughput.png)
 
+And on perf-per-watt — assuming ~3 W per Grace core (estimated, not measured directly), ~5 W per active Apple P-core (Apple's published per-core figures), 19.96 W for Blackwell during the persistent kernel run (measured via `nvidia-smi --query-gpu=power.draw -lms 100`, n=257), and ~2 W for the Cyclone V fabric — Grace c+NEON wins outright at ~1.45M tok/sec/W. Apple's C+NEON paths come next at ~700–750k tok/sec/W. The FPGA at 26.5k still beats Blackwell's 20.7k on watts; the FPGA's 2 W floor wins efficiency even when CUDA wins absolute throughput. Python and MLX paths are wasted power either way.
+
 ![perf-per-watt](charts/perf_per_watt.png)
+
+## a note on Apple silicon scaling
+
+c+NEON tracks clock and microarch generation roughly linearly across the three Apple chips: M4 Max 3.76M (~4.4 GHz) > M3 Ultra 3.63M (~4.05 GHz) > M1 Max 2.91M (~3.2 GHz Firestorm). M1 Max's Q4.12 path is ~30% behind its own fp32, vs ~17% on M4 Max — Apple's `int16` widening MAC pipeline got noticeably wider between 2021 and 2024. None of these cores does anything the others don't; same forward pass, same ~4,000 MACs, same L1 fit.
 
 ## try it yourself
 
