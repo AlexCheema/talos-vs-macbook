@@ -1,4 +1,4 @@
-# talos-vs-macbook
+# talos-vs-macbook-vs-GX10
 
 Have you ever wanted to know whether 50,000 tokens/sec on a custom FPGA is impressive? It is and it isn't. This repo runs Karpathy's [microGPT](https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95) — a 4,192-parameter character-level transformer — in seven different ways across an M4 Max MacBook Pro, M3 Ultra and M1 Max Mac Studios, and an [NVIDIA DGX Spark](https://www.nvidia.com/en-us/products/workstations/dgx-spark/) (GB10 superchip: a 20-core Grace ARM CPU and a Blackwell GPU), and compares all of them to [TALOS-V2](https://github.com/Luthiraa/TALOS-V2)'s 53,000 tok/sec hardware implementation on a Cyclone V FPGA.
 
